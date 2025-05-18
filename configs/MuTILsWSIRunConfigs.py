@@ -106,11 +106,11 @@ class RunConfigs:
 
 def default_model_paths() -> Dict[str, str]:
     return {
-        "mutils_06022021-fold1": "/home/models/fold_1/mutils_06022021_fold1.pt",
-        "mutils_06022021-fold2": "/home/models/fold_2/mutils_06022021_fold2.pt",
-        "mutils_06022021-fold3": "/home/models/fold_3/mutils_06022021_fold3.pt",
-        "mutils_06022021-fold4": "/home/models/fold_4/mutils_06022021_fold4.pt",
-        "mutils_06022021-fold5": "/home/models/fold_5/mutils_06022021_fold5.pt",
+        "mutils_06022021-fold1": "../mutils_project/models/fold_1/mutils_06022021_fold1.pt",
+        "mutils_06022021-fold2": "../mutils_project/models/fold_2/mutils_06022021_fold2.pt",
+        "mutils_06022021-fold3": "../mutils_project/models/fold_3/mutils_06022021_fold3.pt",
+        "mutils_06022021-fold4": "../mutils_project/models/fold_4/mutils_06022021_fold4.pt",
+        "mutils_06022021-fold5": "../mutils_project/models/fold_5/mutils_06022021_fold5.pt",
     }
 
 
@@ -152,8 +152,8 @@ def default_roi_kmeans_kvp() -> Dict[str, Any]:
 class Config:
     """Configuration class for the MuTILsWSIRunner."""
 
-    slides_path: str = "/home/input"
-    base_savedir: str = "/home/output"
+    slides_path: str = "../mutils_project/input"
+    base_savedir: str = "../mutils_project/output"
     model_paths: Dict[str, str] = field(default_factory=default_model_paths)
     monitor: str = ""
 
