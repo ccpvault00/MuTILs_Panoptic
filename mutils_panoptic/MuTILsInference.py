@@ -342,7 +342,7 @@ class ROIPostProcessor:
 
     def run(self):
         self.logger = get_configured_logger(
-            logdir="/home/output/LOGS",
+            logdir="../mutils_project/output/LOGS",
             prefix=f"MuTILsWSIRunner_chunk{self.process_number}",
             tofile=True,
         )

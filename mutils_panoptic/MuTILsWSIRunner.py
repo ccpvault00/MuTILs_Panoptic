@@ -1265,7 +1265,7 @@ class MuTILsWSIRunner:
         if not self.use_gpus:
             return
 
-        logdir = "/home/output/LOGS"
+        logdir = "../mutils_project/output/LOGS"
         latest_logfile = self._get_latest_logfile(logdir)
         chunk_logs = glob(opj(logdir, "MuTILsWSIRunner_chunk*"))
 
