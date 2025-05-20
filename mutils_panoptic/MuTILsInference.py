@@ -11,7 +11,7 @@ from pandas import DataFrame, concat
 from skimage.morphology import binary_dilation
 from dataclasses import dataclass
 from skimage.measure import regionprops
-import multiprocessing as mp
+import torch.multiprocessing as mp
 
 # histolab
 from histolab.util import np_to_pil
@@ -45,6 +45,11 @@ from MuTILs_Panoptic.utils.MiscRegionUtils import (
     get_configured_logger,
 )
 import MuTILs_Panoptic.configs.panoptic_model_configs as model_configs
+from MuTILs_Panoptic.configs.panoptic_model_configs import RegionCellCombination
+from MuTILs_Panoptic.utils.QuPathExportUtils import (
+    export_binary_mask_to_geojson,
+    export_region_masks_to_geojson,
+)
 
 collect_errors = CollectErrors()
 
@@ -370,7 +375,7 @@ class ROIPostProcessor:
         self._modelname = roi.model
         self._roiname = roi.name
         self._rid = roi.number
-
+        
         preds = self.refactor_inference(roi.result, hres_ignore=roi.hres_ignore)
         if preds is None:
             self.logger.info(f"ROI {self._rid} has no nuclei!")
@@ -379,7 +384,7 @@ class ROIPostProcessor:
         preds["sstroma"] = self.get_salient_stroma_mask(preds["combined_mask"][..., 0])
         self._maybe_save_roi_preds(rgb=roi.img, preds=preds)
         preds = self._simplify_roi_preds(preds)
-
+        self._save_masks_to_geojson(preds)
         self._summarize_roi(preds)
 
     def refactor_inference(self, inference, hres_ignore=None):
@@ -1046,3 +1051,44 @@ class ROIPostProcessor:
     @staticmethod
     def _huicolor(col):
         return f"rgb({','.join(str(int(j)) for j in col)})"
+    
+    def _save_masks_to_geojson(self, preds):
+        geojson_dir = opj(self._savedir, 'roiAnnotations')
+        left, top, _, _ = self._roicoords
+        scale = self.hres_mpp / self._slide.base_mpp
+        
+        sstroma_mask = (preds['sstroma'].astype(np.uint8)) * 255
+        export_binary_mask_to_geojson(
+            binary_array=sstroma_mask,
+            save_dir=geojson_dir,
+            roi_name=self._roiname,
+            label_name="sstroma",
+            offset_x=left,
+            offset_y=top,
+            scale=scale,
+            min_area=1,
+            debug=True
+        )
+        export_region_masks_to_geojson(
+            region_mask=preds['mask'][..., 0],
+            region_code_map=RegionCellCombination.REGION_CODES,
+            save_dir=geojson_dir,
+            roi_name=self._roiname,
+            offset_x=left,
+            offset_y=top,
+            scale=scale,
+            min_area=10,
+            debug=True
+        )
+        export_region_masks_to_geojson(
+            region_mask=preds['mask'][...,1],
+            region_code_map=RegionCellCombination.NUCLEUS_CODES,
+            save_dir=geojson_dir,
+            roi_name=self._roiname,
+            offset_x=left,
+            offset_y=top,
+            scale=scale,
+            min_area=10,
+            debug=True
+        )   
+

@@ -1,8 +1,8 @@
 ## -------------------------------------------------------------------------------------
 # Output saving options
 ## -------------------------------------------------------------------------------------
-save_wsi_mask: False
-save_annotations: False
+save_wsi_mask: True
+save_annotations: True
 save_nuclei_meta: True
 save_nuclei_props: True
 
