@@ -436,91 +436,203 @@ class MuTILsWSIRunner:
         process_manager.join_all()
 
     def run_single_model(self, model_rois: dict) -> None:
-        """Run the MuTILs pipeline for a single model.
+        """Run the MuTILs pipeline for a single model using parallel preprocessing and postprocessing.
+        
+        This version uses parallel processing for preprocessing and postprocessing steps
+        while keeping sequential processing for the inference step (GPU computation).
 
         Parameters
         ----------
-
         model_rois : dict
             A dictionary containing the model names as keys and a list of ROI ID numbers
             as values.
         """
         for model_name, rois in model_rois.items():
-
+            # Load the model - still use a single GPU
             _model = self.load_model(
                 model_path=self.model_paths[model_name], device_id=0
             )
             model = {"model": _model, "device": str(0)}
-            # 1. Preprocessing =========================================================
-            preproc_configs = {
-                "_sldname": self._sldname,
-                "_top_rois": self._top_rois,
-                "_slide": self._slide,
-                "hres_mpp": self.hres_mpp,
-                "roi_side_hres": self.roi_side_hres,
-                "roi_side_lres": self.roi_side_lres,
-                "cnorm": self.cnorm,
-                "cnorm_kwargs": self.cnorm_kwargs,
-            }
-            preprocessor = ROIPreProcessor(
-                inference_queue=[],
-                roi_chunk=[],
-                configs=preproc_configs,
-            )
-            # 2. Inference =============================================================
-            inference_processor = ROIInferenceProcessor(
-                gpu_id=0, inference_queue=[], postprocess_queue=[], model=model
-            )
-            # 3. Postprocessing ========================================================
-            postproc_configs = {
-                **preproc_configs,
-                "save_nuclei_meta": self.save_nuclei_meta,
-                "save_wsi_mask": self.save_wsi_mask,
-                "save_nuclei_props": self.save_nuclei_props,
-                "save_annotations": self.save_annotations,
-                "_savedir": self._savedir,
-                "min_nucl_size": self.min_nucl_size,
-                "max_nucl_size": self.max_nucl_size,
-                "max_salient_stroma_distance": self.max_salient_stroma_distance,
-                "min_tumor_for_saliency": self.min_tumor_for_saliency,
-                "discard_edge_hres": self.discard_edge_hres,
-                "filter_stromal_whitespace": self.filter_stromal_whitespace,
-                "maskout_region_codes": self.maskout_region_codes,
-                "nprops_kwargs": self.nprops_kwargs,
-                "n_edge_pixels_discarded": self.n_edge_pixels_discarded,
-                "no_watershed_lbls": self.no_watershed_lbls,
-                "_debug": self._debug,
-            }
-            postprocessor = ROIPostProcessor(
-                process_number=0, postprocess_queue=[], configs=postproc_configs
-            )
-
-            for i, roi in enumerate(rois):
-
-                if self._debug and i > 1:
-                    break
-
-                single_roi = (roi, model_name)
-                preprocessor.run_roi(single_roi)
-
-                result = inference_processor.inference(preprocessor.roi)
-
-                inference_result = InferenceResult(
-                    number=preprocessor.roi.number,
-                    coords=preprocessor.roi.coords,
-                    name=preprocessor.roi.name,
-                    model=preprocessor.roi.model,
-                    batch=preprocessor.roi.batch,
-                    hres_ignore=preprocessor.roi.hres_ignore,
-                    img=preprocessor.roi.img,
-                    result=result,
+            
+            # Create batches of ROIs for parallel preprocessing
+            roi_batches = []
+            batch_size = min(self.N_preprocesses, len(rois))
+            for i in range(0, len(rois), batch_size):
+                batch = [(roi, model_name) for roi in rois[i:i+batch_size]]
+                roi_batches.append(batch)
+                
+            if self._debug:
+                # Limit batches for debugging
+                roi_batches = roi_batches[:1]
+                roi_batches[0] = roi_batches[0][:2]  # Process only 2 ROIs for debugging
+                
+            self.logger.info(f"Running model {model_name} with {len(rois)} ROIs in {len(roi_batches)} batches")
+            
+            # Process each batch
+            for batch_idx, roi_batch in enumerate(roi_batches):
+                self.logger.info(f"Processing batch {batch_idx+1}/{len(roi_batches)} with {len(roi_batch)} ROIs")
+                
+                # 0. Initialize queues for this batch
+                preprocess_queue = mp.Queue(maxsize=len(roi_batch))
+                postprocess_queue = mp.Queue(maxsize=len(roi_batch))
+                
+                # Common configuration parameters
+                preproc_configs = {
+                    "_sldname": self._sldname,
+                    "_top_rois": self._top_rois,
+                    "_slide": self._slide,
+                    "hres_mpp": self.hres_mpp,
+                    "roi_side_hres": self.roi_side_hres,
+                    "roi_side_lres": self.roi_side_lres,
+                    "cnorm": self.cnorm,
+                    "cnorm_kwargs": self.cnorm_kwargs,
+                }
+                
+                postproc_configs = {
+                    **preproc_configs,
+                    "save_nuclei_meta": self.save_nuclei_meta,
+                    "save_wsi_mask": self.save_wsi_mask,
+                    "save_nuclei_props": self.save_nuclei_props,
+                    "save_annotations": self.save_annotations,
+                    "_savedir": self._savedir,
+                    "min_nucl_size": self.min_nucl_size,
+                    "max_nucl_size": self.max_nucl_size,
+                    "max_salient_stroma_distance": self.max_salient_stroma_distance,
+                    "min_tumor_for_saliency": self.min_tumor_for_saliency,
+                    "discard_edge_hres": self.discard_edge_hres,
+                    "filter_stromal_whitespace": self.filter_stromal_whitespace,
+                    "maskout_region_codes": self.maskout_region_codes,
+                    "nprops_kwargs": self.nprops_kwargs,
+                    "n_edge_pixels_discarded": self.n_edge_pixels_discarded,
+                    "no_watershed_lbls": self.no_watershed_lbls,
+                    "_debug": self._debug,
+                }
+                
+                # 1. Start parallel preprocessing =======================================
+                preprocessors = []
+                for i in range(min(self.N_preprocesses, len(roi_batch))):
+                    roi_chunk = [roi_batch[i]] if i < len(roi_batch) else []
+                    preprocessor = mp.Process(
+                        target=self._run_preprocessing,
+                        args=(roi_chunk, preproc_configs, preprocess_queue)
+                    )
+                    preprocessors.append(preprocessor)
+                    preprocessor.start()
+                
+                # 2. Run inference sequentially (single GPU) ===========================
+                inference_processor = ROIInferenceProcessor(
+                    gpu_id=0, inference_queue=None, postprocess_queue=None, model=model
                 )
-                inference_result.to_cpu()
-                torch.cuda.empty_cache()
+                
+                # 3. Start parallel postprocessing =====================================
+                postprocessors = []
+                for i in range(min(self.N_postprocesses, len(roi_batch))):
+                    postprocessor = mp.Process(
+                        target=self._run_postprocessing,
+                        args=(i, postprocess_queue, postproc_configs)
+                    )
+                    postprocessors.append(postprocessor)
+                    postprocessor.start()
+                
+                # 4. Process the ROIs =================================================
+                processed_count = 0
+                while processed_count < len(roi_batch):
+                    # Get preprocessed ROI
+                    roi = preprocess_queue.get()
+                    if roi is None:
+                        continue
+                    
+                    # Run inference (sequential on GPU)
+                    result = inference_processor.inference(roi)
+                    
+                    # Create inference result and send to postprocessing
+                    inference_result = InferenceResult(
+                        number=roi.number,
+                        coords=roi.coords,
+                        name=roi.name,
+                        model=roi.model,
+                        batch=roi.batch,
+                        hres_ignore=roi.hres_ignore,
+                        img=roi.img,
+                        result=result,
+                    )
+                    inference_result.to_cpu()
+                    torch.cuda.empty_cache()
+                    
+                    # Send to postprocessing queue
+                    postprocess_queue.put(inference_result)
+                    processed_count += 1
+                    self.logger.info(f"ROI {roi.number} inference completed ({processed_count}/{len(roi_batch)})")
+                
+                # 5. Clean up processes ===============================================
+                # Send termination signals to postprocessors
+                for _ in range(len(postprocessors)):
+                    postprocess_queue.put(None)
+                    
+                # Join all processes
+                for p in preprocessors:
+                    p.join()
+                for p in postprocessors:
+                    p.join()
+                
+                self.logger.info(f"Batch {batch_idx+1}/{len(roi_batches)} completed")
 
+    def _run_preprocessing(self, roi_chunk: list, configs: dict, output_queue: mp.Queue):
+        """Run preprocessing for a chunk of ROIs and put results in the output queue.
+        
+        Parameters
+        ----------
+        roi_chunk : list
+            List of ROI tuples (roi_id, model_name)
+        configs : dict
+            Configuration parameters for preprocessing
+        output_queue : mp.Queue
+            Queue to put preprocessed ROIs
+        """
+        try:
+            preprocessor = ROIPreProcessor(
+                inference_queue=None,
+                roi_chunk=roi_chunk,
+                configs=configs
+            )
+            
+            for single_roi in roi_chunk:
+                preprocessor.run_roi(single_roi)
+                output_queue.put(preprocessor.roi)
+        except Exception as e:
+            self.logger.error(f"Preprocessing error: {str(e)}")
+        finally:
+            # Signal that this preprocessor is done
+            output_queue.put(None)
+
+    def _run_postprocessing(self, process_number: int, input_queue: mp.Queue, configs: dict):
+        """Run postprocessing for ROIs from the input queue.
+        
+        Parameters
+        ----------
+        process_number : int
+            Process identifier number
+        input_queue : mp.Queue
+            Queue to get inference results from
+        configs : dict
+            Configuration parameters for postprocessing
+        """
+        try:
+            postprocessor = ROIPostProcessor(
+                process_number=process_number,
+                postprocess_queue=None,
+                configs=configs
+            )
+            
+            while True:
+                inference_result = input_queue.get()
+                if inference_result is None:
+                    break
+                    
                 postprocessor.run_roi(inference_result)
-
-                self.logger.info(f"ROI {roi} processed with model {model_name}")
+                self.logger.info(f"ROI {inference_result.number} postprocessing completed")
+        except Exception as e:
+            self.logger.error(f"Postprocessing error: {str(e)}")
 
     def check_gpus(self):
         """Check if GPUs are available. Set self.use_gpus accordingly: True if at least 5 GPUs are
