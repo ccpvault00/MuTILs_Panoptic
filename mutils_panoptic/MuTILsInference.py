@@ -379,7 +379,7 @@ class ROIPostProcessor:
         preds = self.refactor_inference(roi.result, hres_ignore=roi.hres_ignore)
         if preds is None:
             self.logger.info(f"ROI {self._rid} has no nuclei!")
-            return
+            return None
 
         preds["sstroma"] = self.get_salient_stroma_mask(preds["combined_mask"][..., 0])
         self._maybe_save_roi_preds(rgb=roi.img, preds=preds)
