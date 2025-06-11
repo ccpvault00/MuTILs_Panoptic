@@ -359,7 +359,7 @@ class ROIPostProcessor:
             self.run_roi(roi)
             self.logger.info(f"Completed ROI {roi.number} by {roi.model}.")
 
-    def run_roi(self, roi: InferenceResult) -> None:
+    def run_roi(self, roi: InferenceResult) -> Dict[str, Any]:
         """Run postprocessing for the ROI.
 
         Parameters:
@@ -384,8 +384,15 @@ class ROIPostProcessor:
         preds["sstroma"] = self.get_salient_stroma_mask(preds["combined_mask"][..., 0])
         self._maybe_save_roi_preds(rgb=roi.img, preds=preds)
         preds = self._simplify_roi_preds(preds)
-        self._save_masks_to_geojson(preds)
         self._summarize_roi(preds)
+        
+        # Return the prediction data for external processing
+        return {
+            'predictions': preds,
+            'coordinates': self._roicoords,
+            'roi_name': self._roiname,
+            'scale': self.hres_mpp / self._slide.base_mpp
+        }
 
     def refactor_inference(self, inference, hres_ignore=None):
         """
