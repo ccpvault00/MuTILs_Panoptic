@@ -10,6 +10,6 @@ save_nuclei_props: True
 # Run configurations
 ## -------------------------------------------------------------------------------------
 independent_tile_assignment: False # see line 900, MuTILsWSIRunner.py
-N_preprocesses: 32
+N_preprocesses: 30
 N_postprocesses: 64
-_debug: False
+_debug: True 
