@@ -452,6 +452,11 @@ class MuTILsWSIRunner:
             )
             model = {"model": _model, "device": str(0)}
             
+            # Skip if no ROIs for this model
+            if len(rois) == 0:
+                self.logger.info(f"No ROIs assigned to model {model_name}, skipping")
+                return
+                
             # Create batches of ROIs for parallel preprocessing
             roi_batches = []
             batch_size = min(self.N_preprocesses, len(rois))
@@ -627,8 +632,12 @@ class MuTILsWSIRunner:
                 if inference_result is None:
                     break
                     
-                postprocessor.run_roi(inference_result)
-                self.logger.info(f"ROI {inference_result.number} postprocessing completed")
+                try:
+                    postprocessor.run_roi(inference_result)
+                    self.logger.info(f"ROI {inference_result.number} postprocessing completed")
+                except Exception as roi_error:
+                    self.logger.error(f"ROI {inference_result.number} postprocessing failed: {str(roi_error)}")
+                    # Continue processing other ROIs
         except Exception as e:
             self.logger.error(f"Postprocessing error: {str(e)}")
 
@@ -699,9 +708,16 @@ class MuTILsWSIRunner:
     @collect_errors()
     def summarize_slide(self):
         """Get slide-level metrics."""
-        metas = [
-            load_json(path) for path in glob(opj(self._savedir, "roiMeta", "*.json"))
-        ]
+        json_files = glob(opj(self._savedir, "roiMeta", "*.json"))
+        if not json_files:
+            self.logger.warning("No ROI metadata JSON files found. Creating empty slide metrics.")
+            self._sldmeta["metrics"] = {
+                "weighted_by_rois": {"n_rois": 0, "n_salient_rois": 0},
+                "unweighted_global": {},
+            }
+            return
+            
+        metas = [load_json(path) for path in json_files]
         # noinspection PyTypedDict
         self._sldmeta["metrics"] = {
             "weighted_by_rois": self._summarize_rois(metas),
@@ -886,6 +902,10 @@ class MuTILsWSIRunner:
         """
         Get global slide-level metrics (i.e. NOT averaged from rois).
         """
+        if not metas:
+            self.logger.error("No ROI metadata available for global metrics calculation")
+            return {}
+            
         # regions
         pxc = "pixelCount_"
         r_pixsums = self._ksums(
@@ -909,8 +929,31 @@ class MuTILsWSIRunner:
         """
         Get avg and std of roi metadata, weighted by saliency.
         """
-        metrics = DataFrame.from_records([j["metrics"] for j in metas])
+        # Filter out metadata that doesn't have metrics field
+        valid_metas = []
+        for meta in metas:
+            if "metrics" in meta and isinstance(meta["metrics"], dict):
+                valid_metas.append(meta["metrics"])
+            else:
+                self.logger.warning(f"ROI metadata missing 'metrics' field: {meta.get('roi_name', 'unknown')}")
+        
+        if not valid_metas:
+            self.logger.error("No valid ROI metadata found with 'metrics' field")
+            return {"n_rois": 0, "n_salient_rois": 0}
+        
+        metrics = DataFrame.from_records(valid_metas)
         summ = {"n_rois": metrics.shape[0]}
+        
+        # Check if SaliencyScore column exists, if not, add it with default value
+        if "SaliencyScore" not in metrics.columns:
+            self.logger.warning("SaliencyScore column missing from ROI metadata. Adding default values.")
+            metrics["SaliencyScore"] = 0.0
+        
+        # Filter out any NaN values in SaliencyScore
+        if metrics["SaliencyScore"].isna().any():
+            self.logger.warning("Found NaN values in SaliencyScore. Replacing with 0.0.")
+            metrics["SaliencyScore"] = metrics["SaliencyScore"].fillna(0.0)
+        
         # restrict to topk salient rois
         metrics = metrics.sort_values("SaliencyScore", ascending=False)
         if self.topk_salient_rois is not None:
@@ -953,8 +996,19 @@ class MuTILsWSIRunner:
         # enough as ROIs with scattered tumor nests that are spaced out would
         # get a high score even though there's little tumor or maybe even
         # a few misclassified pixels here and there. So we use both.
-        sscore = out[f"{p}_SalientStroma"] / everything
-        sscore *= out[f"{p}_TUMOR"] / everything
+        try:
+            if everything > 0:
+                sscore = out[f"{p}_SalientStroma"] / everything
+                sscore *= out[f"{p}_TUMOR"] / everything
+            else:
+                sscore = 0.0
+            
+            # Ensure sscore is a valid float
+            if not np.isfinite(sscore):
+                sscore = 0.0
+                
+        except (ZeroDivisionError, KeyError, TypeError) as e:
+            sscore = 0.0
         metrics = {
             "SaliencyScore": sscore,
             "TissueRatio": nonjunk / everything,
@@ -1030,7 +1084,36 @@ class MuTILsWSIRunner:
             # This is a good arrangement when you care about fusing the mask
             # from multiple tiles to get whole-slide region polygons for
             # research assessment
+            
+            # Original assignment based on RAG values
             df.loc[top_idxs, "model"] = df.loc[:, "rag"] % self.n_models
+            
+            # Ensure balanced distribution - redistribute if any model has no ROIs
+            if len(top_idxs) >= self.n_models:
+                assigned_models = set(df.loc[top_idxs, "model"].unique())
+                missing_models = set(range(self.n_models)) - assigned_models
+                
+                if missing_models:
+                    self.logger.info(f"Redistributing ROIs to ensure all models get assignments. Missing models: {missing_models}")
+                    
+                    # Count ROIs per model
+                    model_counts = df.loc[top_idxs, "model"].value_counts()
+                    
+                    # Redistribute ROIs from models with multiple ROIs to missing models
+                    for missing_model in missing_models:
+                        # Find model with most ROIs
+                        donor_model = model_counts.idxmax()
+                        if model_counts[donor_model] > 1:
+                            # Find first ROI assigned to donor model
+                            donor_roi_mask = (df.index.isin(top_idxs)) & (df["model"] == donor_model)
+                            donor_roi_idx = df[donor_roi_mask].index[0]
+                            
+                            # Reassign to missing model
+                            df.loc[donor_roi_idx, "model"] = missing_model
+                            
+                            # Update counts
+                            model_counts[donor_model] -= 1
+                            model_counts[missing_model] = model_counts.get(missing_model, 0) + 1
         return df
 
     def _pick_topk_rois_from_rag(self, full_df):

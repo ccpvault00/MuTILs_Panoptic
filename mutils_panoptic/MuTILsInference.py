@@ -137,6 +137,11 @@ class ROIPreProcessor:
         self.roi_side_lres = configs.get("roi_side_lres")
         self.cnorm = configs.get("cnorm")
         self.cnorm_kwargs = configs.get("cnorm_kwargs")
+        self.logger = get_configured_logger(
+            logdir="../mutils_project/output/LOGS",
+            prefix="MuTILsPreprocessor",
+            tofile=True,
+        )
 
     def run(self):
         """Loop through one chunk."""
@@ -145,8 +150,7 @@ class ROIPreProcessor:
                 roi = self.run_roi(single_roi)
                 self.inference_queue.put(roi)
             except Exception as e:
-                # TODO: record error in the log file
-                print(f"Error processing ROI: {e}")
+                self.logger.error(f"Error processing ROI {single_roi[0]}: {e}", exc_info=True)
                 continue
 
     def run_roi(self, single_roi: tuple):
@@ -258,6 +262,11 @@ class ROIInferenceProcessor:
         self.inference_queue = inference_queue
         self.postprocess_queue = postprocess_queue
         self.model = model
+        self.logger = get_configured_logger(
+            logdir="../mutils_project/output/LOGS",
+            prefix=f"MuTILsInference_GPU{gpu_id}",
+            tofile=True,
+        )
 
     def run(self):
         while True:
@@ -282,8 +291,7 @@ class ROIInferenceProcessor:
                 torch.cuda.empty_cache()
                 self.put()
             except Exception as e:
-                # TODO: record error in the log file
-                print(f"Error processing ROI: {e}")
+                self.logger.error(f"Error processing ROI {roi.number}: {e}", exc_info=True)
                 continue
 
     def inference(self, roi: ROI):
@@ -976,8 +984,19 @@ class ROIPostProcessor:
         # enough as ROIs with scattered tumor nests that are spaced out would
         # get a high score even though there's little tumor or maybe even
         # a few misclassified pixels here and there. So we use both.
-        sscore = out[f"{p}_SalientStroma"] / everything
-        sscore *= out[f"{p}_TUMOR"] / everything
+        try:
+            if everything > 0:
+                sscore = out[f"{p}_SalientStroma"] / everything
+                sscore *= out[f"{p}_TUMOR"] / everything
+            else:
+                sscore = 0.0
+            
+            # Ensure sscore is a valid float
+            if not np.isfinite(sscore):
+                sscore = 0.0
+                
+        except (ZeroDivisionError, KeyError, TypeError) as e:
+            sscore = 0.0
         metrics = {
             "SaliencyScore": sscore,
             "TissueRatio": nonjunk / everything,
